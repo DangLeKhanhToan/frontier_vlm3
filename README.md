@@ -107,7 +107,11 @@ The remaining stall is the first call of the episode (nothing to drive yet). Tur
 | `tools/check_scenarios.py` | checks scenarios with Arena's parser, loads their agent types, checks free floor under every point; no launch |
 | `tools/scenario_peds.py` | replays a scenario's people and timeline triggers for `hospital_sim.py --scenario` (people walk blind straight lines) |
 | `scenarios/` | hospital_1: `fvlm3_lab_empty`, `fvlm3_lab_crowd`, `fvlm3_pharmacy_crowd`, and the interaction set `fvlm3_pass_crowd`, `fvlm3_follow_slow`, `fvlm3_sudden_turn`, `fvlm3_cut_and_stop`, `fvlm3_group_oncoming` (behaviour files in `<scenario>/agent_types/`) + `link.sh` |
-| `tests/test_fvlm3.py` | 29 offline tests (incl. OpenAI / Gemini wire format and the proxy against fake servers, the scenario replay) |
+| `tests/test_fvlm3.py` | 30 offline tests (incl. OpenAI / Gemini wire format and the proxy against fake servers, the scenario replay, `profile: vln`) |
+| `tools/run_vln_scenarios.sh` | CONTAINER: one episode per (VLN planner x bench3 scenario) with trace, robot view, chase view and people recorded (section 8) |
+| `tools/render_vln.py` | episode video for ANY bridge planner from the SDK decision trace (floor plan, third-person, robot view, model input / output / execution); no GPU |
+| `tools/peds_recorder.py` | CONTAINER: records `arena_peds` to `peds.csv` (VLN planners never see people, the video takes them from here) |
+| `tools/plot_scenarios.py` | top-down design figure of a scenario (paths, triggers, regions); no ROS |
 
 Outside this folder: the recording camera `camera/vln_rgbd_rec` in `arena_robots`
 (branch `bench3/vln-rgbd-rec`): `vln_rgbd` unchanged plus a 640x480 / 30 Hz RGB sensor on the
@@ -451,6 +455,9 @@ Conditions `people`, `floorplan`, `rules` (on/off) · model `provider` (claude/o
 
 ## 7. Not yet verified in the live simulator (check in the smoke test)
 
+- 2026-11-06: `vln_rgbd_rec` and `vln_*_rec` now expand with xacro (pip xacro in a throwaway
+  container, sensors and optics as expected), the chase camera has not been rendered by Gazebo yet.
+
 - Models: on 2026-11-05 only `gemini-3.5-flash` was run for real (offline hospital, 4 of 4 calls
   OK, 5.5 s median). `gpt-5.5` and `claude-opus-5-5` have only been tested against fake servers
   (request format) and a free model list; 5.4a is their first real call.
@@ -471,3 +478,38 @@ Conditions `people`, `floorplan`, `rules` (on/off) · model `provider` (claude/o
   `robot.mobile.goal:=instruction` withholds it from the planner.
 - `tools/run_conditions.sh` stops each launch with a wall-clock `timeout`; moving it to
   `arena evaluation benchmark` suites is the next step.
+
+## 8. As a VLN module next to CMA / NaVid / NaVILA / StreamVLN (2026-11-06)
+
+frontier_vlm3 is a submodule `vln/frontier_vlm3` of arena_planners like the other VLNs
+(`arena feature planners ls` lists it; its own repo, branch `master`, not pushed yet). Same contract:
+`goal_inputs: [instruction]`, `signals: [arrived]`, `robot.mobile:=vla`, the goal pose withheld.
+
+- `robot.mobile.config.profile:=vln` gives it exactly the VLN inputs: the camera image untouched
+  (`people: raw`, no people ground truth, no labels, no inpainting) and no floor plan. `rules` stays a
+  switch, so "frontier VLN +/- rules" is the clean ablation against the trained VLNs. Differences that
+  remain: waypoint chunks + pure pursuit instead of discrete primitives, and the lidar local grid /
+  safety stop. See `~/work/bench3/docs/vln_planners.md`.
+- Decision trace (arena_planners SDK, all planners): `ARENA_PLANNER_TRACE_DIR=<dir>` writes
+  `<dir>/<planner>/<episode>/trace.jsonl` (reset, every step: command / chunk / signal, pose, latency,
+  the model answer the planner logged) and the frame the model saw at each call.
+- Recording cameras with a third-person view: `vln_rgbd_rec` (CMA, frontier_vlm3) and `vln_rgb_rec`
+  variants `vln_navid_rec`, `vln_uninavid_rec`, `vln_navila_rec`, `vln_streamvln_rec`: the planner's own
+  camera unchanged + `rec_image` (640x480, 30 Hz) + `chase_image` (2.6 m behind, 1.6 m up, 28 deg down,
+  30 Hz, branch `bench3/vln-rgbd-rec` of arena_robots).
+
+```bash
+# CONTAINER, once (no GPU needed): build the VLN planners (each gets its pinned environment) and the cameras
+arena build arena_robots arena_planners arena_planners_cma arena_planners_navid arena_planners_navila arena_planners_streamvln arena_planner_frontier_vlm3
+source /opt/arena_ws/install/setup.bash
+# HOST: copy the bench3 scenarios into the world after any edit
+~/work/bench3/scripts/sync_scenarios.sh
+# CONTAINER, inside the GPU claim, in tmux: one planner over all bench3_* scenarios
+cd /opt/arena_ws/src/Arena/arena_planners/planners/frontier_vlm3
+tools/run_vln_scenarios.sh vln1 cma                                  # smallest first
+tools/run_vln_scenarios.sh vln1 navila bench3_cross_repeat           # one scenario
+PROVIDER=openai MODEL=gpt-5.5 RULES=on tools/run_vln_scenarios.sh vln1 frontier_vlm3
+# afterwards, CPU: videos
+python3 tools/render_vln.py --all /opt/arena_ws/data/bench3/probe/bench3-<date>-vln1-cma-cross_repeat
+```
+
