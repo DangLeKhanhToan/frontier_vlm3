@@ -1,0 +1,27 @@
+# Stands by the east wall. On the need "cut" (robot within 4 m of 10,18) it walks
+# diagonally across the hallway to the west wall, then down to the ward door and stays.
+name: cut_across
+extends: adult
+mode: behavior_tree
+
+needs:
+  cut:
+    initial: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+    decay_rate: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+
+sequences:
+  default:
+    steps:
+      stand: {duration: {mean: 3600.0}}
+    then: default
+    transitions:
+      - when: {cut: {above: 50.0}}
+        goto: cut
+  cut:
+    steps:
+      across: {kind: go_to, target_pose: {x: 8.5, y: 18.5, theta: 3.1416}}
+      down: {kind: go_to, target_pose: {x: 8.5, y: 14.0, theta: -1.5708}}
+      stay: {duration: {mean: 3600.0}}
+    then: cut
+
+initial_sequence: default

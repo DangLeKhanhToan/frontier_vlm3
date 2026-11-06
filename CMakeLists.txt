@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.8)
+project(arena_planner_frontier_vlm3)
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_venv_uv REQUIRED)
+uv_venv()
+ament_package()

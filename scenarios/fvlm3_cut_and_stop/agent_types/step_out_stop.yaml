@@ -1,0 +1,28 @@
+# Waits inside the operating-room doorway. On the need "go" it steps into the middle of the
+# hallway, stands there 8 s, then walks to the patient ward door and stays.
+name: step_out_stop
+extends: adult
+mode: behavior_tree
+
+needs:
+  go:
+    initial: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+    decay_rate: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+
+sequences:
+  default:
+    steps:
+      wait_in_door: {duration: {mean: 3600.0}}
+    then: default
+    transitions:
+      - when: {go: {above: 50.0}}
+        goto: step_out
+  step_out:
+    steps:
+      to_middle: {kind: go_to, target_pose: {x: 10.0, y: 17.3, theta: 3.1416}}
+      read_chart: {duration: {mean: 8.0, clip_low: 8.0, clip_high: 8.0}}
+      to_ward: {kind: go_to, target_pose: {x: 8.5, y: 21.1, theta: 3.1416}}
+      stay: {duration: {mean: 3600.0}}
+    then: step_out
+
+initial_sequence: default

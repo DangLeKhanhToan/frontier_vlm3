@@ -1,0 +1,79 @@
+# frontier_vlm3: a frontier VLM drives the robot from an instruction only.
+# The model never receives goal coordinates. It picks sub-goal pixels in the RGB frame;
+# the harness projects them to the map with depth, plans around obstacles and follows the path.
+action_type: waypoints
+rate_hz: 5
+goal_inputs: [instruction]
+signals: [arrived]
+sensor_needs: [image, depth, laserscan]
+chunk:
+  execute_s: 0.4
+  lookahead_m: 0.35
+  speed_mps: 0.5
+
+observations:
+  datasources:
+    rgb:
+      type: sensor_msgs/Image
+      params: {sensor: image}
+    depth:
+      type: sensor_msgs/Image
+      params: {sensor: depth}
+    scan:
+      type: sensor_msgs/LaserScan
+      params: {sensor: laserscan, canonical_beams: 720}
+    peds:
+      type: arena_people_msgs/Pedestrians
+      params: {topic: arena_peds}
+    robot_pose:
+      type: RobotPoseTFGenerator
+
+# Every key can be overridden per launch: robot.mobile.config.<key>:=<value>
+config:
+  # ---- the three study conditions (what the model is given) ----
+  profile: ""          # "" = use the three switches below; vln = the VLN planners' contract (camera + instruction only):
+                        #   forces people=raw, floorplan=off; rules stays a free switch (frontier VLN +/- rules)
+  people: "on"          # on: people labelled in the image + listed (ground truth); off: people inpainted out (ground truth);
+                        # raw: camera image untouched, no people list, no ground truth (what CMA/NaVid/NaVILA/StreamVLN get)
+  floorplan: "on"       # on: top-down floor plan image (+ zone names) and the static map in the harness planner; off: camera only, laser-only local map
+  rules: "on"           # on: social navigation rules in the system prompt; off: no rules
+  # ---- model ----
+  provider: claude      # claude | openai | gemini | mock
+  model: ""             # "" = provider default: claude-opus-5-5 | gpt-5.5 | gemini-3.1-pro-preview
+  effort: low           # low keeps latency down (claude effort, openai reasoning_effort, gemini thinkingLevel); "off" = do not send
+  fallbacks: default    # claude only: server-side refusal fallback; "off" to disable (e.g. a proxy that rejects it)
+  max_tokens: 8000      # includes thinking tokens for openai / gemini
+  timeout_s: 30
+  mock_latency_s: 2.5   # mock provider: simulated API latency
+  # ---- world (floor plan) ----
+  world: ""             # e.g. hospital_1; resolves map + zones under arena_simulation_setup/worlds/<world>
+  map_yaml: ""          # explicit map yaml (overrides world)
+  world_yaml: ""        # explicit world.yaml for zone names (overrides world)
+  # ---- camera (vln_rgbd on the jackal top mount) ----
+  cam_hfov_deg: 90.0
+  cam_x: 0.03
+  cam_y: 0.0
+  cam_z: 1.19           # camera height above the floor, m (check with tf2_echo, see README)
+  cam_pitch_deg: 0.0    # positive = looking down
+  depth_max_m: 10.0
+  image_upscale: 3      # 224 px camera -> 672 px image sent to the model
+  # ---- motion / harness ----
+  speed_mps: 0.5
+  robot_radius: 0.35
+  max_subgoal_m: 6.0
+  max_subgoals: 3
+  turn_step_deg: 45
+  safety_stop_m: 0.45
+  # ---- latency pipeline (answer before the plan runs out) ----
+  prefetch: true
+  prefetch_margin_s: 1.0     # call when remaining plan time < predicted latency + margin
+  latency_init_s: 4.0
+  latency_quantile: 0.8
+  max_answer_age_s: 12.0     # discard answers whose frame is older than this
+  refresh_s: 10.0            # replan at least this often while driving
+  event_person_m: 3.0        # new person this close (people:=on) triggers an early call
+  max_calls: 120
+  # ---- logging ----
+  log_dir: /opt/arena_ws/data/vlm_calls
+  run_label: ""              # sub-directory under log_dir; default fvlm3-<conditions>-<date>
+  save_images: true

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>arena_planner_frontier_vlm3</name>
+  <version>0.3.0</version>
+  <description>Frontier VLM (Claude) as an instruction-only VLN planner: image sub-goals, depth projection, async replanning.</description>
+  <maintainer email="khanhtoanleviforapp@gmail.com">levi</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_venv_uv</buildtool_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,25 @@
+# Stands 8 s (talking), then walks the hallway north to the laboratory door and stays there.
+# While the need "slow" is above 50 (set by the scenario timeline) she walks at 0.35 x her speed.
+name: slowing_walker
+extends: adult
+mode: behavior_tree
+
+needs:
+  slow:
+    initial: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+    decay_rate: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+
+tunes:
+  - when: {slow: {above: 50.0}}
+    tune: {desired_velocity: {mul: 0.35}}
+
+sequences:
+  default:
+    steps:
+      talk: {duration: {mean: 8.0, clip_low: 8.0, clip_high: 8.0}}
+      walk_mid: {kind: go_to, target_pose: {x: 10.0, y: 18.0, theta: 1.5708}}
+      walk_lab: {kind: go_to, target_pose: {x: 10.4, y: 26.0, theta: 1.5708}}
+      stay: {duration: {mean: 3600.0}}
+    then: default
+
+initial_sequence: default

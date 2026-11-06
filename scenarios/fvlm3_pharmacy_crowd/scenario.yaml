@@ -1,0 +1,37 @@
+# frontier_vlm3: goal on the west side, needs a turn out of the central hallway, same walkers.
+format: arena-scenario/2
+robots:
+- start: [10.0, 6.0, 1.5708]
+  phases:
+  - {goto: pharmacy, tolerance_radius: 2.5, signal: arrived, text: "Go to the pharmacy."}
+humans:
+- name: oncoming_1
+  model: Hospital/doctor_male_caucasian_middleage
+  pose: [10.6, 16.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.9}
+  waypoints: [[10.6, 4.0], [10.6, 30.0]]
+- name: same_dir_1
+  model: arenian
+  pose: [9.4, 9.5, 1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.6}
+  waypoints: [[9.4, 32.0], [9.4, 6.0]]
+- name: walker_3
+  model: arenian
+  pose: [9.6, 15.0, 1.5708]
+  agent: {agent_type: adult, desired_velocity: 1.2}
+  waypoints: [[9.6, 32.0], [9.6, 6.0]]
+- name: walker_4
+  model: arenian
+  pose: [10.8, 19.5, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 1.0}
+  waypoints: [[10.8, 6.5], [10.8, 31.0]]
+- name: walker_5
+  model: Hospital/nurse_female_caucasian_young
+  pose: [8.7, 22.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 1.1}
+  waypoints: [[8.7, 6.0], [8.7, 33.0]]
+- name: walker_6
+  model: arenian
+  pose: [11.3, 25.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 1.2}
+  waypoints: [[11.3, 6.0], [11.3, 33.0]]

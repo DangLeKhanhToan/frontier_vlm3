@@ -1,0 +1,29 @@
+# Stands 6 s (on the phone), then walks slowly north. On the need "turn" (scenario timeline: robot within 3 m) it turns
+# around and walks back south fast, past the robot's start, then stands at the entrance.
+name: turn_back
+extends: adult
+mode: behavior_tree
+
+needs:
+  turn:
+    initial: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+    decay_rate: {mean: 0.0, clip_low: 0.0, clip_high: 0.0}
+
+sequences:
+  default:
+    steps:
+      phone: {duration: {mean: 6.0, clip_low: 6.0, clip_high: 6.0}}
+      ahead: {kind: go_to, target_pose: {x: 10.0, y: 31.0, theta: 1.5708}}
+      wait: {duration: {mean: 3600.0}}
+    then: default
+    transitions:
+      - when: {turn: {above: 50.0}}
+        goto: back
+  back:
+    tune: {desired_velocity: {mul: 4.0}, max_velocity: 1.6}
+    steps:
+      rush: {kind: go_to, target_pose: {x: 10.0, y: 2.0, theta: -1.5708}}
+      wait: {duration: {mean: 3600.0}}
+    then: back
+
+initial_sequence: default

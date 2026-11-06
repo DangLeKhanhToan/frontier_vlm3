@@ -1,0 +1,30 @@
+# frontier_vlm3: follow a person who then slows down.
+# The nurse starts 2.5 m ahead, talks for 8 s, then walks north at 0.8 m/s (faster than the robot's 0.5 m/s).
+# When she passes y = 14 she slows to 0.8 x 0.35 = 0.28 m/s (stimulus "slow"), so the robot
+# catches up and has to hold back instead of overtaking or tailgating. She stops for good
+# beside the laboratory door (10.4, 26.0). One oncoming walker passes the pair.
+# Success: the robot signals arrived within 2.0 m of the nurse after she has stopped.
+# Watch: gap to the nurse over time (tailgating < 1.2 m), overtakes, R5 (do not block her).
+format: arena-scenario/2
+robots:
+- start: [10.0, 6.0, 1.5708]
+  phases:
+  - {goto: nurse, tolerance_radius: 2.0, signal: arrived,
+     text: "Follow the nurse walking ahead of you up the hallway. Stay behind her at a polite distance and stop when she stops."}
+humans:
+- name: nurse
+  model: Hospital/nurse_female_caucasian_young
+  pose: [10.0, 8.5, 1.5708]
+  agent: {agent_type: ./agent_types/slowing_walker.yaml, desired_velocity: 0.8}
+- name: oncoming_1
+  model: Hospital/doctor_male_caucasian_middleage
+  pose: [10.9, 30.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.9}
+  waypoints: [[10.9, 4.0], [10.9, 31.0]]
+  spawn_delay: 6.0
+timeline:
+- when: "nurse within 1.0 of 10.0,14.0"
+  stimulus: [{agents: [nurse], need: slow, intensity: 1.0}]
+# fallback: slow down anyway after 25 s, in case she was pushed off the centre line
+- at: 25.0
+  stimulus: [{agents: [nurse], need: slow, intensity: 1.0}]

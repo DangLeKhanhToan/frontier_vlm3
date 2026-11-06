@@ -1,0 +1,45 @@
+# frontier_vlm3: three people walking abreast toward the robot fill most of the 4 m hallway,
+# then a pair comes out of the pharmacy door just as the robot has to turn west into it.
+# Tests early yielding to the side (R2), not splitting the group (R3), the turn into the goal.
+format: arena-scenario/2
+robots:
+- start: [10.0, 6.0, 1.5708]
+  phases:
+  - {goto: pharmacy, tolerance_radius: 2.5, signal: arrived, text: "Go to the pharmacy."}
+humans:
+- name: group_w
+  model: arenian
+  pose: [9.0, 22.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.8}
+  waypoints: [[9.0, 3.0]]
+  waypoint_mode: once
+  spawn_delay: 2.0
+- name: group_c
+  model: Hospital/doctor_male_caucasian_middleage
+  pose: [10.0, 22.2, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.8}
+  waypoints: [[10.0, 3.2]]
+  waypoint_mode: once
+  spawn_delay: 2.0
+- name: group_e
+  model: Hospital/nurse_female_caucasian_young
+  pose: [11.0, 22.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.8}
+  waypoints: [[11.0, 3.0]]
+  waypoint_mode: once
+  spawn_delay: 2.0
+# pair leaving the pharmacy (door x 8, y 26.9-28.4) and walking north
+- name: pharmacy_pair_a
+  model: arenian
+  pose: [8.5, 27.4, 0.0]
+  agent: {agent_type: elder, desired_velocity: 0.6}
+  waypoints: [[10.0, 28.0], [10.0, 33.0]]
+  waypoint_mode: once
+  spawn_delay: 25.0
+- name: pharmacy_pair_b
+  model: arenian
+  pose: [8.5, 28.0, 0.0]
+  agent: {agent_type: elder, desired_velocity: 0.6}
+  waypoints: [[10.6, 28.6], [10.6, 33.6]]
+  waypoint_mode: once
+  spawn_delay: 25.0

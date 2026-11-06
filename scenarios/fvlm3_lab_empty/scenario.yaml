@@ -1,0 +1,7 @@
+# frontier_vlm3: instruction-only goal, no people. The pose below is for Arena's
+# success check only; robot.mobile.goal:=instruction withholds it from the planner.
+format: arena-scenario/2
+robots:
+- start: [10.0, 6.0, 1.5708]
+  phases:
+  - {goto: laboratory, pose: [14.5, 23.4, 0.0], tolerance_radius: 2.5, signal: arrived, text: "Go to the laboratory."}

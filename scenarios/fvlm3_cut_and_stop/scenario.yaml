@@ -1,0 +1,29 @@
+# frontier_vlm3: someone steps out of the operating-room door right in front of the robot,
+# stops in the middle of the hallway for 8 s (reading a chart), then walks to the ward door.
+# Background: one same-direction and one oncoming walker.
+# Tests R1 (personal space), R6 (do not rush a stopped person): wait or pass with >= 1 m.
+format: arena-scenario/2
+robots:
+- start: [10.0, 6.0, 1.5708]
+  phases:
+  - {goto: laboratory, pose: [14.5, 23.4, 0.0], tolerance_radius: 2.5, signal: arrived, text: "Go to the laboratory."}
+humans:
+- name: stopper
+  model: Hospital/doctor_male_caucasian_middleage
+  pose: [11.7, 17.3, 3.1416]
+  agent: {agent_type: ./agent_types/step_out_stop.yaml, desired_velocity: 0.9}
+- name: same_dir_1
+  model: arenian
+  pose: [9.0, 8.0, 1.5708]
+  agent: {agent_type: adult, desired_velocity: 0.7}
+  waypoints: [[9.0, 32.0], [9.0, 6.0]]
+- name: oncoming_1
+  model: Hospital/nurse_female_caucasian_young
+  pose: [11.2, 28.0, -1.5708]
+  agent: {agent_type: adult, desired_velocity: 1.0}
+  waypoints: [[11.2, 4.0], [11.2, 31.0]]
+  spawn_delay: 5.0
+timeline:
+# the robot is about 3 m before the door when he steps out
+- when: "robot within 3.5 of 10.0,17.3"
+  stimulus: [{agents: [stopper], need: go, intensity: 1.0}]
