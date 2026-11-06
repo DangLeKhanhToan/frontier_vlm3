@@ -16,7 +16,8 @@
 # plan), RULES=on|off picks the rules switch, PROVIDER/MODEL/EFFORT the frontier model (key proxy).
 # Env: EP_SECONDS (default 300), SIM (gazebo), WORLD (hospital_1), HUMAN (arena: needed for the
 #      scenario stimuli and for BLOCK), STAGE (probe), RESULTS (/opt/arena_ws/data/bench3),
-#      RENDER (1 = render right away; default 0: render later on the CPU), EXTRA (more launch args).
+#      RENDER (1 = render right away; default 0: render later on the CPU), EXTRA (more launch args),
+#      SEED (run_seed, default 1; part of the run folder name), EPISODES (episodes per launch, default 1).
 # One folder per run: $RESULTS/<stage>/bench3-<date>-<tag>-<planner>-<scenario short>/
 #   run.json, trace/<planner>/<episode>/trace.jsonl + frames/ (ARENA_PLANNER_TRACE_DIR),
 #   rec/ (robot view 30 Hz), chase/ (third-person 30 Hz), peds.csv, launch.log
@@ -30,6 +31,7 @@ if [ ${#scen[@]} -eq 0 ]; then
 fi
 WORLD="${WORLD:-hospital_1}"; SIM="${SIM:-gazebo}"; EP_SECONDS="${EP_SECONDS:-300}"; HUMAN="${HUMAN:-arena}"
 STAGE="${STAGE:-probe}"; RESULTS="${RESULTS:-/opt/arena_ws/data/bench3}"; RENDER="${RENDER:-0}"
+SEED="${SEED:-1}"; EPISODES="${EPISODES:-1}"
 KEYPROXY="${KEYPROXY:-http://127.0.0.1:18765}"
 args=(); arena_planner="$planner"
 case "$planner" in
@@ -57,14 +59,14 @@ arena_sha="$(git -C /opt/arena_ws/src/Arena rev-parse --short=8 HEAD 2>/dev/null
 planners_sha="$(git -C /opt/arena_ws/src/Arena/arena_planners rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
 date_tag="$(date +%Y%m%d)"; t0=$(date +%s)
 for s in "${scen[@]}"; do
-  label="bench3-${date_tag}-${tag}-${planner}-${s#bench3_}"
+  label="bench3-${date_tag}-${tag}-${planner}-${s#bench3_}-s${SEED}"
   run="$RESULTS/$STAGE/$label"
   if [ -e "$run/launch.log" ]; then echo "    $run exists: use a new tag"; continue; fi
   mkdir -p "$run/trace"
   cat > "$run/run.json" <<JSON
 {"run_id": "$label", "stage": "$STAGE", "sim": "$SIM", "world": "$WORLD", "scenario": "$s", "planner": "$planner",
  "model": "${MODEL:-$planner}", "provider": "${PROVIDER:-local}", "rules": "${RULES:-}", "camera": "$camera", "human": "$HUMAN",
- "ep_seconds": $EP_SECONDS, "extra": "${EXTRA:-}", "arena_sha": "$arena_sha", "arena_planners_sha": "$planners_sha", "started": "$(date +%Y-%m-%dT%H:%M:%S)"}
+ "ep_seconds": $EP_SECONDS, "seed": "$SEED", "episodes": $EPISODES, "ros_domain_id": "${ROS_DOMAIN_ID:-}", "extra": "${EXTRA:-}", "arena_sha": "$arena_sha", "arena_planners_sha": "$planners_sha", "started": "$(date +%Y-%m-%dT%H:%M:%S)"}
 JSON
   echo "################ $label  camera=$camera  ($(( ($(date +%s) - t0) / 60 )) min so far)"
   python3 "$here/cam_recorder.py" --out "$run/rec" --suffix /rec_image > "$run/rec.log" 2>&1 & p1=$!
@@ -73,7 +75,7 @@ JSON
   ARENA_PLANNER_TRACE_DIR="$run/trace" ARENA_PLANNER_TRACE_NAME="$planner" \
   timeout --signal=INT "$EP_SECONDS" arena launch sim:="$SIM" world:="$WORLD" human:="$HUMAN" headless:=true \
     robot:="jackal[camera=$camera]" robot.planner:="$arena_planner" robot.mobile.goal:=instruction \
-    task.robots:=scenario task.obstacles:=scenario task.scenario.file:="$s" task.episode.count:=1 \
+    task.robots:=scenario task.obstacles:=scenario task.scenario.file:="$s" task.episode.count:="$EPISODES" run_seed:="bench3-$SEED" \
     "${args[@]}" ${EXTRA:-} 2>&1 | tee "$run/launch.log"
   kill -INT $p1 $p2 $p3 2>/dev/null; wait $p1 $p2 $p3 2>/dev/null
   n_tr=$(find "$run/trace" -name trace.jsonl | wc -l)
