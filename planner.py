@@ -1,7 +1,8 @@
 """frontier_vlm3 entry point: Arena bridge <-> harness.
 
 Runs as the planner subprocess (`ros2 run arena_planner_frontier_vlm3 python planner.py`).
-step() never blocks on the model: API calls run in a background thread inside the harness.
+API calls run in a background thread inside the harness. step() does not wait for them, except with
+latency_mode:=zero, where it waits so that a lockstep simulator waits with it.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ def on_init(planner_config: dict) -> None:
     cfg = dict(_MANIFEST.get("config") or {})
     cfg.update(planner_config or {})
     _harness = Harness(cfg)
-    _log.info("conditions %s, provider %s, model %s, prefetch %s, log %s", _harness.cond.tag, cfg.get("provider"), cfg.get("model"), cfg.get("prefetch"), _harness.log_root)
+    _log.info("conditions %s, provider %s, model %s, prefetch %s, latency_mode %s, log %s", _harness.cond.tag, cfg.get("provider"), cfg.get("model"), cfg.get("prefetch"), cfg.get("latency_mode"), _harness.log_root)
 
 
 def on_reset(episode_id: str, initial_state: dict | None) -> None:

@@ -136,6 +136,24 @@ def kind(step: dict) -> str:
     return "hold"
 
 
+def load_frontier(tdir: pathlib.Path, walls: list[float]) -> tuple[list[dict], list[dict], pathlib.Path | None]:
+    """frontier_vlm3 keeps its decisions in the call log, not in trace logs: return (calls, ticks, log dir)."""
+    if tdir.parent.name != "frontier_vlm3":
+        return [], [], None
+    dirs = sorted(pathlib.Path("/opt/arena_ws/data/vlm_calls").glob(f"*/ep*_{tdir.name}"))
+    if not dirs:
+        return [], [], None
+    recs = load_jsonl(dirs[-1] / "calls.jsonl")
+    sent = {r["call"]: r for r in recs if r.get("phase") == "sent"}
+    calls = []
+    for r in recs:
+        if r.get("phase") == "answer":
+            i = min(bisect.bisect_left(walls, float(r["wall"])), len(walls) - 1)
+            calls.append({**r, "i": i, "sent": sent.get(r["call"], {})})
+    ticks = load_jsonl(dirs[-1] / "ticks.jsonl") if (dirs[-1] / "ticks.jsonl").is_file() else []
+    return calls, ticks, dirs[-1]
+
+
 class Episode:
     def __init__(self, tdir: pathlib.Path, run: pathlib.Path | None, world: str):
         self.dir = tdir
@@ -154,6 +172,11 @@ class Episode:
             self.st = [float(s["wall"]) - float(self.steps[0]["wall"]) for s in self.steps]
         self.T0, self.T1 = self.st[0], self.st[-1]
         self.calls = [i for i, s in enumerate(self.steps) if s.get("logs")]
+        self.frontier, self.ticks, self.call_dir = load_frontier(tdir, [float(s["wall"]) for s in self.steps])
+        if self.frontier:
+            self.calls = [c["i"] for c in self.frontier]
+        self.tick_w = [float(t["wall"]) for t in self.ticks]
+        self.conditions = (load_jsonl(self.call_dir / "meta.jsonl")[0].get("conditions") or {}) if self.call_dir else {}
         self.run = run
         self.meta = json.loads((run / "run.json").read_text()) if run and (run / "run.json").is_file() else {}
         self.rec = Recording(run / "rec" if run and (run / "rec").is_dir() else run if run and (run / "index.csv").is_file() else None)
@@ -175,6 +198,27 @@ class Episode:
                 self.static = fp.load_static_map(my, wy)
         poses = [s.get("pose") for s in self.steps]
         self.poses = np.array([p if p is not None else [np.nan] * 3 for p in poses], dtype=float)
+        # Gazebo poses and people carry Arena's env offset; the floor plan is in authored coordinates
+        dx, dy = self._env_offset(wy if self.world and my else None)
+        self.poses[:, :2] -= (dx, dy)
+        self.peds = {t: [(x - dx, y - dy, n) for x, y, n in v] for t, v in self.peds.items()}
+
+    def _env_offset(self, world_yaml) -> tuple[float, float]:
+        """Env offset of this run: the first recorded pose minus the scenario's robot start, (0, 0) when unknown."""
+        name = pathlib.Path(str(self.meta.get("scenario", ""))).name
+        valid = self.poses[~np.isnan(self.poses[:, 0])]
+        if not (world_yaml and name and len(valid)):
+            return 0.0, 0.0
+        path = pathlib.Path(world_yaml).parent / "scenarios" / name / "scenario.yaml"
+        if not path.is_file():
+            return 0.0, 0.0
+        import yaml  # noqa: PLC0415
+
+        robots = yaml.safe_load(path.read_text()).get("robots") or []
+        if not robots or "start" not in robots[0]:
+            return 0.0, 0.0
+        sx, sy = robots[0]["start"][:2]
+        return round(float(valid[0, 0] - sx), 2), round(float(valid[0, 1] - sy), 2)
 
     def idx(self, T: float) -> int:
         return max(0, bisect.bisect_right(self.st, T) - 1)
@@ -274,7 +318,107 @@ class Renderer:
         img = self._fit(self.ep.chase.at(T), CHASE_W, TOP_H, "third-person camera")
         return _put(img, lambda d: d.text((12, 8), "Third-person view", font=F_TITLE, fill=(255, 255, 255)))
 
+    def _call_img(self, call: int, suffix: str, size: int) -> np.ndarray:
+        key = (call, suffix, size)
+        if not hasattr(self, "_img_cache"):
+            self._img_cache = {}
+        if key not in self._img_cache:
+            src = cv2.imread(str(self.ep.call_dir / "images" / f"c{call:03d}_{suffix}.jpg"))
+            self._img_cache[key] = self._fit(None if src is None else cv2.resize(src, (size, size)), size, size, "image")
+        return self._img_cache[key]
+
+    def _bottom_frontier(self, T: float) -> np.ndarray:
+        """frontier_vlm3: the image the model saw, the sub-goals it chose, its reasoning, and what the harness did."""
+        ep = self.ep
+        img = np.full((BOT_H, W, 3), PAPER, np.uint8)
+        i = ep.idx(T)
+        done = [c for c in ep.frontier if c["i"] <= i]
+        c = done[-1] if done else None
+        aw, ow, tile = 500, 860, 300
+        if c:
+            img[40:40 + tile, 14:14 + tile] = self._call_img(c["call"], "in0", tile)
+            img[40:40 + tile, aw + 10:aw + 10 + tile] = self._call_img(c["call"], "answer", tile)
+        tick = None
+        if ep.ticks:
+            tick = ep.ticks[min(bisect.bisect_left(ep.tick_w, float(ep.steps[i]["wall"])), len(ep.ticks) - 1)]
+        cost = sum(float(x.get("cost_usd") or 0) for x in done)
+
+        def d(dr):
+            dr.text((14, 10), "MODEL INPUT", font=F_HEAD, fill=_rgb(INK))
+            tx = 14 + tile + 10
+            if not c:
+                dr.text((14, 44), "no model call yet", font=F_BODY, fill=_rgb(MUTED))
+            else:
+                snt = c["sent"]
+                hist = str(snt.get("text", "")).count("\n  - t=")
+                y = 44
+                cond = ep.conditions
+                for ln in [f"decision {c['call']}", f"called: {snt.get('reason', '?')}", f"previous plan left: {float(snt.get('plan_left_m') or 0):.1f} m", f"recent decisions sent: {hist}", f"floor plan: {'sent' if cond.get('floorplan') else 'not sent'}", f"people list: {'sent' if cond.get('people') else 'not sent'}"]:
+                    dr.text((tx, y), ln, font=F_SMALL, fill=_rgb(INK))
+                    y += 18
+                y += 8
+                for ln in wrap_text("Also sent: system prompt with the social rules. Depth is used only to place the points, the model does not see it.", F_SMALL, aw - tx - 8)[:7]:
+                    dr.text((tx, y), ln, font=F_SMALL, fill=_rgb(MUTED))
+                    y += 16
+            y = 40 + tile + 8
+            for ln in wrap_text(f'Instruction: "{ep.instruction}"', F_SMALL, aw - 28)[:3]:
+                dr.text((14, y), ln, font=F_SMALL, fill=_rgb(INK))
+                y += 16
+            x = aw + 10
+            dr.line([(aw, 8), (aw, BOT_H - 8)], fill=(210, 205, 200), width=1)
+            dr.text((x, 10), "MODEL OUTPUT", font=F_HEAD, fill=_rgb(INK))
+            if c:
+                dr.text((x, 40 + tile + 8), "red: sub-goals chosen by the model", font=F_SMALL, fill=_rgb(MUTED))
+                rep = c.get("reply") or {}
+                tx, tw = x + tile + 10, ow - tile - 30
+                y = 12
+                dr.text((tx, y), f"call {c['call']} at t = {ep.st[c['i']] - ep.T0:.1f} s, model took {float(c.get('latency_s') or 0):.1f} s", font=F_BOLD, fill=_rgb(CALL))
+                y = 34
+
+                def block(text, font, fill, limit):
+                    nonlocal y
+                    for ln in wrap_text(text, font, tw)[:limit]:
+                        if y < BOT_H - 18:
+                            dr.text((tx, y), ln, font=font, fill=_rgb(fill))
+                            y += 15
+
+                block(f"action: {rep.get('action', c.get('outcome') or 'no usable reply')}   progress: {rep.get('progress', '-')}   outcome: {c.get('outcome')}", F_BOLD, INK, 2)
+                y += 3
+                block("Scene: " + str(rep.get("scene", "")), F_SMALL, INK, 5)
+                y += 3
+                proj = c.get("projected") or []
+                for n, g in enumerate(rep.get("subgoals") or []):
+                    src = f", {proj[n]['range_m']:.1f} m by {proj[n]['source']}" if n < len(proj) and proj[n].get("range_m") else ""
+                    block(f"{n + 1}. ({g.get('u')}, {g.get('v')}){src}: {g.get('why', '')}", F_SMALL, INK, 3)
+                y += 3
+                block("Reasoning: " + str(rep.get("path_reasoning", "")), F_SMALL, INK, 6)
+                if rep.get("rules_applied"):
+                    block("Rules: " + ", ".join(rep["rules_applied"]), F_SMALL, MUTED, 1)
+            x = aw + ow + 20
+            dr.line([(aw + ow + 10, 8), (aw + ow + 10, BOT_H - 8)], fill=(210, 205, 200), width=1)
+            dr.text((x, 10), "EXECUTION", font=F_HEAD, fill=_rgb(INK))
+            dwb = ep.meta.get("executor") == "dwb"
+            how = "Pixels + depth -> map points -> A* path -> " + ("Nav2 DWB drives it (FollowPath)." if dwb else "pure pursuit on the waypoint chunk.")
+            y = 44
+            for ln in wrap_text(how, F_SMALL, W - x - 16):
+                dr.text((x, y), ln, font=F_SMALL, fill=_rgb(INK))
+                y += 16
+            y += 12
+            if tick:
+                dr.text((x, y), "Harness now", font=F_SMALL, fill=_rgb(MUTED))
+                stuck = tick.get("why") == "safety_stop"
+                dr.text((x, y + 18), f"{tick.get('motion')}: {tick.get('why')}", font=F_BOLD, fill=(190, 60, 30) if stuck else _rgb(INK))
+                dr.text((x, y + 40), f"plan left: {float(tick.get('plan_left_m') or 0):.1f} m", font=F_SMALL, fill=_rgb(INK))
+                y += 70
+            dr.text((x, y), f"model calls: {len(done)}   cost so far: ${cost:.2f}", font=F_SMALL, fill=_rgb(INK))
+            v, w_ = self._speed(i)
+            dr.text((x, BOT_H - 30), f"measured: v = {v:.2f} m/s, omega = {w_:+.2f} rad/s", font=F_SMALL, fill=_rgb(INK))
+
+        return _put(img, d)
+
     def _bottom(self, T: float) -> np.ndarray:
+        if self.ep.frontier:
+            return self._bottom_frontier(T)
         ep = self.ep
         img = np.full((BOT_H, W, 3), PAPER, np.uint8)
         i = ep.idx(T)

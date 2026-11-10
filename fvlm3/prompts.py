@@ -68,7 +68,13 @@ class Conditions:
         return Conditions(pm == "on", on(cfg.get("floorplan", "on")), on(cfg.get("rules", "on")), pm)
 
 
-def system_prompt(c: Conditions, zone_names: list[str]) -> str:
+def system_prompt(c: Conditions, zone_names: list[str], zero_latency: bool = False) -> str:
+    plan_note = (
+        "Continuing: the blue line in the image is the part of the previous plan the robot has not driven yet; a blue dot marks where that plan ends. "
+        if zero_latency
+        else "Latency: the robot keeps driving while you think. The blue line in the image is the part of the previous plan "
+        "it is still driving; a blue dot marks where that plan ends. "
+    )
     parts = [
         "You are the navigation brain of a wheeled robot (about 0.5 m wide, camera at 1.2 m height). "
         "You receive a task in plain language. You are NOT told where the goal is: find it by looking.",
@@ -79,8 +85,7 @@ def system_prompt(c: Conditions, zone_names: list[str]) -> str:
         "The robot measures the depth of each point, turns it into a position on its map, plans around obstacles and drives there. "
         "A point on the floor 1 to 5 m away works best; the farthest point should be 2 to 6 m away when the floor is open.",
         "",
-        "Latency: the robot keeps driving while you think. The blue line in the image is the part of the previous plan "
-        "it is still driving; a blue dot marks where that plan ends. When a blue line is shown, start your points near or beyond its end so the robot can continue without stopping, "
+        plan_note + "When a blue line is shown, start your points near or beyond its end so the robot can continue without stopping, "
         "unless the plan is no longer safe or no longer leads toward the goal.",
         "",
         "Actions: 'goto' (with sub-goals), 'turn_left' / 'turn_right' (rotate about 45 degrees to look around, when the goal or a way forward is not visible), "
