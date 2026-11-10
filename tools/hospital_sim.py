@@ -187,13 +187,14 @@ def main() -> None:
     ap.add_argument("--model", default="", help="default: the provider default (see planner.yaml)")
     ap.add_argument("--effort", default="low")
     ap.add_argument("--max-calls", type=int, default=20, help="hard cap on model calls")
+    ap.add_argument("--pipeline", default="", help="'' (pixel sub-goals) | mission (L2) | vlnav (L3, candidates); needs F1")
     ap.add_argument("--scenario", default="", help="replay a scenario's start, instruction, people and timeline (name under scenarios/ or a folder); default: the fixed lab walk")
     a = ap.parse_args()
     if bool(a.run_dir) == bool(a.out):
         ap.error("give exactly one of --run-dir or --out")
     rw, rh = (int(v) for v in a.rec_size.split("x"))
     onoff = lambda ch: {"1": "on", "r": "raw"}.get(a.conds[a.conds.index(ch) + 1], "off")  # noqa: E731  (P r = people raw)
-    cfg = {"people": onoff("P"), "floorplan": onoff("F"), "rules": onoff("R"), "provider": "mock", "world": "hospital_1", "log_dir": a.run_dir or str(pathlib.Path(a.out) / "vlm_calls"), "run_label": "calls" if a.run_dir else a.label, "latency_init_s": a.latency, "mock_latency_s": a.latency, "max_calls": a.max_calls}
+    cfg = {"people": onoff("P"), "floorplan": onoff("F"), "rules": onoff("R"), "provider": "mock", "world": "hospital_1", "log_dir": a.run_dir or str(pathlib.Path(a.out) / "vlm_calls"), "run_label": "calls" if a.run_dir else a.label, "latency_init_s": a.latency, "mock_latency_s": a.latency, "max_calls": a.max_calls, "pipeline": a.pipeline}
     world = World("hospital_1")
     if a.provider == "mock":
         h = Harness(cfg, provider=MockProvider(latency_s=a.latency, seed=2))
@@ -221,7 +222,7 @@ def main() -> None:
     rec_dir = pathlib.Path(a.run_dir) if a.run_dir else pathlib.Path(a.out) / "vlm_video" / a.label
     if a.run_dir:
         rec_dir.mkdir(parents=True, exist_ok=True)
-        (rec_dir / "run.json").write_text(json.dumps({"run_id": rec_dir.name, "stage": rec_dir.parent.name, "sim": "hospital_sim (offline, no GPU)", "world": "hospital_1", "scenario": a.scenario or "fixed lab walk", "instruction": instruction, "conditions": a.conds, "provider": a.provider, "model": cfg.get("model", "mock"), "effort": a.effort, "seconds": a.seconds, "max_calls": a.max_calls, "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "cmd": " ".join(sys.argv)}, indent=1) + "\n")
+        (rec_dir / "run.json").write_text(json.dumps({"run_id": rec_dir.name, "stage": rec_dir.parent.name, "sim": "hospital_sim (offline, no GPU)", "world": "hospital_1", "scenario": a.scenario or "fixed lab walk", "instruction": instruction, "conditions": a.conds, "pipeline": a.pipeline, "provider": a.provider, "model": cfg.get("model", "mock"), "effort": a.effort, "seconds": a.seconds, "max_calls": a.max_calls, "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "cmd": " ".join(sys.argv)}, indent=1) + "\n")
     rec_dir.mkdir(parents=True, exist_ok=True)
     peds_log = open(rec_dir / "peds.csv", "w", buffering=1)
     peds_log.write("t,robot_x,robot_y,robot_yaw,id,name,x,y,dist\n")
