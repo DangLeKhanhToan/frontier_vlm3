@@ -513,3 +513,23 @@ PROVIDER=openai MODEL=gpt-5.5 RULES=on tools/run_vln_scenarios.sh vln1 frontier_
 python3 tools/render_vln.py --all /opt/arena_ws/data/bench3/probe/bench3-<date>-vln1-cma-cross_repeat
 ```
 
+
+## VL-Nav pipeline (ablation levels L1-L3, `fvlm3/vlnav.py`, 2026-11-10)
+
+| level | config | the model gets | the model answers |
+|---|---|---|---|
+| L0 | `profile:=vln` | camera + instruction | pixel sub-goals |
+| L1 | `profile:=frontier people:=raw floorplan:=on` | + labelled floor plan (rooms, doors, furniture, legend, robot + camera wedge), "the robot is in <zone>" | pixel sub-goals |
+| L2 | L1 + `pipeline:=mission` | + one MISSION call at the start; then the route as text and a light-blue line | MISSION: target room, route of room/door names, sub-tasks; then pixel sub-goals |
+| L3 | L1 + `pipeline:=vlnav` | MISSION, then WAYPOINT calls: camera with green free floor + numbered candidates, local map view (1 m rings, candidates, laser obstacles o# with motion arrows, route), candidate list with metres-to-go and distance to moving obstacles, a route-follower hint | candidate number (or wait / turn / arrived) |
+
+Harness loop (L3), 5 Hz:
+1. laser points off the static walls -> clusters -> tracks o1, o2, ... with velocity (`Tracker`)
+2. the next route waypoint is reached (door: < 1 m; target room: inside its polygon) -> event call
+3. call triggers: `mission` (first), `idle`, `prefetch` (plan time left < predicted latency + 1 s), `blocked`, `moving obstacle` (a new moving track < 3 m, in front), `waypoint ... reached`, `refresh` (10 s)
+4. candidates: the point 3 m along the route (geodesic on the static map, kept to the middle of hallways) and its +-0.8 m shifts, plus a fan at 1.5-4.5 m and -60..60 deg; free and in line of sight in the local grid (static map + laser), >= 0.6 m from tracks, numbered left to right
+5. the chosen candidate -> A* in the local grid -> path to Nav2 DWB (executor dwb); the robot keeps driving while the next call runs (latency_mode real)
+Logs per call: `kind` (mission | waypoint), `cands`, `hint`, `choice`, `agrees_with_hint`, `route_xy`, `tracks`; ticks carry `wp` and `tracks`.
+Render: `python3 tools/render_pipeline.py <calls_episode_dir> --run <run_dir>` -> `pipeline/keyframes/c###.png` + `pipeline/pipeline.mp4`.
+Offline (no GPU): `python3 tools/hospital_sim.py --run-dir ... --conds PrF1R1 --pipeline vlnav --provider openai --scenario <scenario dir>`.
+The planner venv has no scipy: `RouteGraph` then uses a numpy distance field (same distances, 0.2 s per waypoint).

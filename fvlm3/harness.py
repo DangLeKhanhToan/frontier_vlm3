@@ -35,6 +35,7 @@ import numpy as np
 from . import floorplan as fp
 from . import perception as pc
 from . import prompts as pr
+from . import vlnav as vn
 from .geometry import Camera, map_to_robot, robot_to_map, wrap
 from .providers import Reply, Request, cost_usd, make_provider
 
@@ -51,6 +52,8 @@ class Snapshot:
     reason: str
     plan_left_m: float
     images: list
+    kind: str = "pixels"  # pixels | mission | waypoint
+    extra: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -134,8 +137,23 @@ class Harness:
             else:
                 _log.warning("floorplan:=on but no map found (set robot.mobile.config.world or map_yaml); the model gets no floor plan image")
         zone_names = [z["name"] for z in self.static.zones] if self.static else []
+        door_names = [d["name"] for d in self.static.doors] if self.static else []
         self.system = pr.system_prompt(self.cond, zone_names, self.zero_latency)
         self.schema = pr.reply_schema(self.cond)
+        # VL-Nav pipeline (vlnav.py): "" = pixel sub-goals only, mission = L2, vlnav = L3
+        self.pipeline = str(cfg.get("pipeline", "") or "").strip().lower()
+        if self.pipeline not in ("", "mission", "vlnav"):
+            raise ValueError(f"pipeline must be '', 'mission' or 'vlnav', got {self.pipeline!r}")
+        self.planmap = vn.PlanMap(self.static) if self.static is not None else None
+        if self.pipeline:
+            if self.static is None:
+                raise ValueError("pipeline mission/vlnav needs the floor plan (floorplan:=on and a map)")
+            self.route_graph = vn.RouteGraph(self.static)
+            self.mission_system = vn.mission_system(zone_names, door_names)
+            self.mission_schema = vn.mission_schema(zone_names, door_names)
+            if self.pipeline == "vlnav":
+                self.system = vn.waypoint_system(pr.SOCIAL_RULES if self.cond.rules else None)
+                self.schema = vn.waypoint_schema(self.cond.rules)
         self.provider = provider if provider is not None else make_provider(cfg)
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="fvlm3-call")
         self.speed = float(cfg.get("speed_mps", 0.5))
@@ -171,6 +189,15 @@ class Harness:
         self.last_tick = None
         self.last_pose = None
         self.rgb_checked = False
+        self.mission: dict | None = None
+        self.route_names: list[str] = []
+        self.waypoints: list = []
+        self.wp_idx = 0
+        self.route_event = ""
+        self.tracker = vn.Tracker(self.static) if self.pipeline == "vlnav" else None
+        self.tracks: list[dict] = []
+        self.announced: set[str] = set()
+        self.chosen_xy = None
         self.stats = dict(calls=0, ok=0, failed=0, stale=0, unusable=0, stall_s=0.0, safety_stop_s=0.0, drive_s=0.0, dist_m=0.0, cost_usd=0.0, reasons={}, latencies=[], usage={"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
         if self.log_root is not None and episode_id != "":
             self.log = EpisodeLog(self.log_root / f"ep{self.episode_idx:03d}_{episode_id}"[:120], bool(self.cfg.get("save_images", True)))
@@ -241,6 +268,9 @@ class Harness:
             depth = depth.astype(np.float32) / (1000.0 if depth.dtype == np.uint16 else 1.0)
         grid = fp.build_grid(pose, scan, self.static, self.radius)
         self._advance_plan(pose)
+        if self.tracker is not None:
+            self.tracks = self.tracker.update(pose, scan, now)
+        self._advance_route(pose)
 
         # 2. answer arrived?
         if self.future is not None and self.future.done():
@@ -272,7 +302,7 @@ class Harness:
                 _log.warning("planner camera is %dx%d; expected the 224 px vln camera (did the adapter bind the recording camera?)", rgb.shape[1], rgb.shape[0])
             self.log.write("camera", {"rgb_shape": list(rgb.shape), "depth_shape": None if depth is None else list(depth.shape)})
         peds_log = [] if peds is None else np.round(np.asarray(peds, dtype=np.float64).reshape(-1, 5), 3).tolist() if np.asarray(peds).size else []
-        self.log.write("ticks", {"t": now - self.t0, "wall": time.time(), "pose": pose.tolist(), "peds": peds_log, "call": self.call_no if self.future is not None else 0, "motion": m.kind, "why": m.why, "plan_left_m": path_length(self.plan) if self.plan is not None else 0.0, "in_flight": self.future is not None, "pred_latency": self.predicted_latency()})
+        self.log.write("ticks", {"t": now - self.t0, "wall": time.time(), "pose": pose.tolist(), "peds": peds_log, "call": self.call_no if self.future is not None else 0, "motion": m.kind, "why": m.why, "plan_left_m": path_length(self.plan) if self.plan is not None else 0.0, "in_flight": self.future is not None, "pred_latency": self.predicted_latency(), **self._tick_extra()})
         return m
 
     # ------------------------------------------------------------ plan bookkeeping
@@ -306,8 +336,13 @@ class Harness:
             return ""
         if self.call_no >= int(self.cfg.get("max_calls", 120)):
             return ""
+        if self.pipeline and self.mission is None:
+            return "mission"
         if self.turn_target is not None or now < self.wait_until:
             return ""
+        if self.route_event:
+            ev, self.route_event = self.route_event, ""
+            return ev
         if self.plan is None:
             return "idle"
         left_s = path_length(self.plan) / max(self.speed, 1e-3)
@@ -319,6 +354,12 @@ class Harness:
             near_new = [p for p in people_now if p.dist < float(self.cfg.get("event_person_m", 3.0)) and p.ped_id not in self.seen_ped_ids]
             if near_new:
                 return "person"
+        if self.tracker is not None:
+            near = [t for t in self.tracks if t.get("speed", 0) > 0.25 and t["dist"] < float(self.cfg.get("event_person_m", 3.0))
+                    and abs(t["bearing_deg"]) < 100 and t["id"] not in self.announced]
+            if near:
+                self.announced.update(t["id"] for t in near)
+                return "moving obstacle " + ", ".join(f"{t['id']} {vn.side_of(t['bearing_deg'], t['dist'])}" for t in near)
         if now - self.plan_t > float(self.cfg.get("refresh_s", 10.0)):
             return "refresh"
         return ""
@@ -326,7 +367,10 @@ class Harness:
     def _start_call(self, reason: str, pose, rgb, depth, people_now, now) -> None:
         self.call_no += 1
         self.stats["calls"] += 1
-        self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
+        key = "moving_obstacle" if reason.startswith("moving") else ("waypoint" if reason.startswith("waypoint") else reason)
+        self.stats["reasons"][key] = self.stats["reasons"].get(key, 0) + 1
+        if reason == "mission" or self.pipeline == "vlnav":
+            return self._start_vlnav_call(reason, pose, rgb, depth, now)
         rgb = np.asarray(rgb)[..., :3]
         if rgb.dtype != np.uint8:
             rgb = np.clip(rgb * (255.0 if rgb.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
@@ -346,9 +390,12 @@ class Harness:
         cam_img = pc.annotate_camera(rgb, self.cam, people if self.cond.people else None, plan_px, int(self.cfg.get("image_upscale", 3)))
         images = [cam_img]
         if self.cond.floorplan and self.static is not None:
-            images.append(fp.render_floorplan(self.static, pose, self.trail, self.plan, self.cam.hfov_deg, self.visited))
+            images.append(self.planmap.full(pose, self.trail, self.plan, self._route_xy(pose), self.cam.hfov_deg, self.visited, (self.mission or {}).get("target", "")))
         zone_here = self.static.zone_of(pose[0], pose[1]) if self.static is not None else None
         text = pr.user_text(self.cond, self.instruction, self.call_no, now - self.t0, self.history[-5:], pc.people_lines(people), plan_left, zone_here, self.note)
+        if self.mission is not None:  # L2: the mission route as text; the floor plan shows it in light blue
+            nxt = self.waypoints[self.wp_idx].name if self.wp_idx < len(self.waypoints) else self.mission.get("target", "")
+            text += f"\nYour mission plan: target {self.mission.get('target')}; route {' > '.join(self.route_names)}; next waypoint {nxt} (light blue line on the floor plan)."
         self.note = ""
         req = Request(self.system, text, images, self.schema, depth=depth, cam=self.cam)
         self.snap = Snapshot(now, pose.copy(), None if depth is None else depth.copy(), people, self.call_no, reason, plan_left, images)
@@ -395,13 +442,19 @@ class Harness:
             return
         self.fail_streak = 0
         self.stats["ok"] += 1
-        if age > float(self.cfg.get("max_answer_age_s", 12.0)):
+        if age > float(self.cfg.get("max_answer_age_s", 12.0)) and snap.kind != "mission":
             self.stats["stale"] += 1
             rec["outcome"] = "stale"
             self.note = "Your previous answer arrived too late and was not used."
             self.log.write("calls", rec)
             return
         d = reply.data
+        if snap.kind == "mission":
+            self._apply_mission(d, rec, pose)
+            return
+        if snap.kind == "waypoint":
+            self._apply_waypoint(d, rec, snap, pose, grid, now)
+            return
         action = str(d.get("action", "wait"))
         summary = f"t={snap.t - self.t0:.0f}s {action}: {str(d.get('path_reasoning', ''))[:110]}"
         outcome = action
@@ -434,6 +487,151 @@ class Harness:
         if snap.images and self.log.save_images:
             pts = [(int(s.get("u", 0)), int(s.get("v", 0))) for s in (d.get("subgoals") or [])][: int(self.cfg.get("max_subgoals", 3))]
             self.log.image(f"c{snap.call_no:03d}_answer.jpg", pc.draw_answer(snap.images[0], pts))
+
+    # ------------------------------------------------------------ VL-Nav pipeline (L2 / L3)
+
+    def _route_xy(self, pose) -> list | None:
+        """Route still to drive, robot -> next waypoint -> ... -> target (for drawing)."""
+        if not self.waypoints or self.wp_idx >= len(self.waypoints):
+            return None
+        pts, cur = [(float(pose[0]), float(pose[1]))], (float(pose[0]), float(pose[1]))
+        for w in self.waypoints[self.wp_idx:]:
+            seg = self.route_graph.path(self.route_graph.field(*w.xy), *cur)
+            pts += seg[::3] + ([seg[-1]] if seg else [])
+            cur = w.xy
+        return pts
+
+    def _advance_route(self, pose) -> None:
+        if not self.waypoints or self.wp_idx >= len(self.waypoints):
+            return
+        w = self.waypoints[self.wp_idx]
+        here = self.static.zone_of(pose[0], pose[1]) if self.static is not None else None
+        reached = (w.kind == "door" and math.hypot(pose[0] - w.xy[0], pose[1] - w.xy[1]) < 1.0) or (w.kind == "zone" and here == w.name)
+        if reached:
+            self.wp_idx += 1
+            nxt = self.waypoints[self.wp_idx].name if self.wp_idx < len(self.waypoints) else ""
+            self.route_event = f"waypoint {w.name} reached" + (f", next {nxt}" if nxt else " (inside the target room)")
+
+    def _tick_extra(self) -> dict:
+        if not self.pipeline:
+            return {}
+        out = {"wp": self.waypoints[self.wp_idx].name if self.wp_idx < len(self.waypoints) else ""}
+        if self.tracker is not None:
+            out["tracks"] = [[t["id"], round(t["xy"][0], 2), round(t["xy"][1], 2), round(t["v"][0], 2), round(t["v"][1], 2)] for t in self.tracks]
+        return out
+
+    def _prep_rgb(self, rgb):
+        rgb = np.asarray(rgb)[..., :3]
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb * (255.0 if rgb.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
+        self.cam.width, self.cam.height = rgb.shape[1], rgb.shape[0]
+        return rgb
+
+    def _start_vlnav_call(self, reason: str, pose, rgb, depth, now) -> None:
+        rgb = self._prep_rgb(rgb)
+        up = int(self.cfg.get("image_upscale", 3))
+        zone_here = self.static.zone_of(pose[0], pose[1])
+        plan_left = path_length(self.plan) if self.plan is not None else 0.0
+        extra: dict = {}
+        if reason == "mission":
+            kind = "mission"
+            cam_img = pc.annotate_camera(rgb, self.cam, None, None, up)
+            images = [cam_img, self.planmap.full(pose, self.trail, None, None, self.cam.hfov_deg, self.visited)]
+            text = vn.mission_user(self.instruction, zone_here)
+            system, schema = self.mission_system, self.mission_schema
+        else:
+            kind = "waypoint"
+            grid = fp.build_grid(pose, None, self.static, self.radius)
+            for t in self.tracks:  # laser obstacles into the grid used for candidates (static map + tracks)
+                grid.add_points(np.array([t["xy"]]))
+            grid.inflate(self.radius)
+            w = self.waypoints[self.wp_idx] if self.wp_idx < len(self.waypoints) else None
+            field = self.route_graph.field(*w.xy) if w is not None else None
+            route_path = self.route_graph.path(field, pose[0], pose[1]) if field is not None else []
+            cands = vn.make_candidates(pose, grid, self.cam, route_path, self.tracks, self.route_graph, field, int(self.cfg.get("max_candidates", 7)))
+            hint = vn.heuristic_pick(cands)
+            route_xy = self._route_xy(pose)
+            cam_img = vn.annotate_candidates(pc.annotate_camera(rgb, self.cam, None, None, up), self.cam, cands, depth, up)
+            local = self.planmap.local(pose, self.trail, self.plan, route_xy, cands, 0, self.tracks, self.cam.hfov_deg)
+            images = [cam_img, local]
+            text = vn.waypoint_user(self.instruction, self.mission or {}, self.route_names, w.name if w else (self.mission or {}).get("target", "?"),
+                                    zone_here, reason, vn.track_lines(self.tracks), vn.candidate_lines(cands), hint, self.history[-4:], now - self.t0, plan_left, self.note)
+            system, schema = self.system, self.schema
+            extra = {"cands": cands, "hint": hint, "route_xy": route_xy, "tracks": [dict(t) for t in self.tracks]}
+        self.note = ""
+        req = Request(system, text, images, schema, depth=depth, cam=self.cam)
+        self.snap = Snapshot(now, pose.copy(), None if depth is None else depth.copy(), [], self.call_no, reason, plan_left, images, kind, extra)
+        self.future = self.pool.submit(self.provider, req)
+        rec = {"call": self.call_no, "phase": "sent", "kind": kind, "t": now - self.t0, "wall": time.time(), "reason": reason,
+               "images": [f"c{self.call_no:03d}_in{k}.jpg" for k in range(len(images))], "pose": pose.tolist(), "plan_left_m": plan_left,
+               "pred_latency": self.predicted_latency(), "text": text, "zone": zone_here,
+               "wp": self.waypoints[self.wp_idx].name if self.wp_idx < len(self.waypoints) else ""}
+        if extra:
+            rec.update(cands=[{k: c[k] for k in ("id", "xy", "px", "src", "range_m", "bearing_deg", "to_go_m", "people_clear_m")} for c in extra["cands"]],
+                       hint=extra["hint"], route_xy=extra["route_xy"], tracks=[{k: t[k] for k in ("id", "xy", "v", "speed", "dist", "bearing_deg", "motion")} for t in extra["tracks"]])
+        self.log.write("calls", rec)
+        for k, im in enumerate(images):
+            self.log.image(f"c{self.call_no:03d}_in{k}.jpg", im)
+
+    def _apply_mission(self, d: dict, rec: dict, pose) -> None:
+        self.mission = d
+        self.route_names = [str(n) for n in d.get("route") or []]
+        target = str(d.get("target", ""))
+        self.waypoints = vn.resolve_route(self.static, self.route_graph, self.route_names, target, (float(pose[0]), float(pose[1])))
+        self.wp_idx = 0
+        rec["outcome"] = "mission"
+        rec["waypoints"] = [dataclasses.asdict(w) for w in self.waypoints]
+        self.history.append(f"mission: target {target}, route {' > '.join(self.route_names)}")
+        self.log.write("calls", rec)
+
+    def _apply_waypoint(self, d: dict, rec: dict, snap: Snapshot, pose, grid, now) -> None:
+        action = str(d.get("action", "wait"))
+        choice = int(d.get("choice", 0) or 0)
+        cands = {c["id"]: c for c in snap.extra.get("cands", [])}
+        hint = snap.extra.get("hint", 0)
+        outcome = action
+        if action == "arrived":
+            self.arrived = True
+            self.plan = None
+        elif action in ("turn_left", "turn_right"):
+            step = math.radians(float(self.cfg.get("turn_step_deg", 45)))
+            self.turn_target = wrap(pose[2] + (step if action == "turn_left" else -step))
+            self.plan = None
+        elif action == "wait":
+            self.wait_until = now + 1.5
+            self.plan = None
+        elif choice in cands:
+            c = cands[choice]
+            goal = grid.nearest_free(*c["xy"])
+            path = None
+            if goal is not None:
+                seg = grid.astar((float(pose[0]), float(pose[1])), goal)
+                if seg is None and grid.segment_free((float(pose[0]), float(pose[1])), goal):
+                    seg = [(float(pose[0]), float(pose[1])), goal]
+                path = fp.resample(seg, 0.25) if seg and len(seg) >= 2 else None
+            if path is None:
+                self.stats["unusable"] += 1
+                outcome = "unusable"
+                self.note = f"Candidate {choice} could not be reached any more; choose again."
+            else:
+                self.plan, self.plan_t, self.chosen_xy = path, now, c["xy"]
+                rec["plan_len_m"] = path_length(path)
+                rec["plan"] = np.round(path, 3).tolist()
+        else:
+            outcome = "unusable"
+            self.stats["unusable"] += 1
+            self.note = f"Choice {choice} is not one of the candidates."
+        rec.update(outcome=outcome, choice=choice, hint=hint, agrees_with_hint=(choice == hint))
+        self.stats.setdefault("hint_agree", 0)
+        self.stats.setdefault("choices", 0)
+        if action == "goto":
+            self.stats["choices"] += 1
+            self.stats["hint_agree"] += int(choice == hint)
+        self.history.append(f"t={snap.t - self.t0:.0f}s {action}{' ' + str(choice) if action == 'goto' else ''}: {str(d.get('why', ''))[:100]}")
+        self.log.write("calls", rec)
+        if self.log.save_images and snap.images:
+            up = int(self.cfg.get("image_upscale", 3))
+            self.log.image(f"c{snap.call_no:03d}_answer.jpg", vn.annotate_candidates(snap.images[0], self.cam, [c for c in snap.extra.get("cands", []) if c["id"] == choice], None, up, choice))
 
     def _project_and_plan(self, subgoals: list, snap: Snapshot, pose, grid: fp.LocalGrid):
         """Image points -> map points (with the snapshot's depth + pose) -> path from the current pose."""

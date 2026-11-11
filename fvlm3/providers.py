@@ -324,8 +324,24 @@ class MockProvider:
         time.sleep(max(0.0, self.latency_s * float(self.rng.uniform(0.7, 1.3))))
         cam = req.cam
         depth = req.depth
-        data = {"scene": "mock", "progress": "searching", "action": "goto", "subgoals": [], "path_reasoning": "mock: farthest open floor"}
         props = req.schema.get("properties", {})
+        if "target" in props and "route" in props:  # vlnav MISSION: the target room named in the task, route = its door
+            zones = props["target"]["enum"]
+            names = props["route"]["items"]["enum"]
+            low = req.text.splitlines()[0].lower().replace(" ", "_")  # the task line only
+            target = next((z for z in sorted(zones, key=len, reverse=True) if z in low or z.replace("_", "") in low.replace("_", "")), zones[0])
+            door = next((n for n in names if n.startswith(target) and n.endswith("door")), None) or next((n for n in names if target.split("_")[0] in n and "door" in n), None)
+            route = [n for n in ("central_hallway", door, target) if n]
+            return Reply(True, {"interpretation": f"mock: go to {target}", "target": target, "route": route, "subtasks": ["mock"], "why": "mock"}, time.monotonic() - t0, model="mock")
+        if "choice" in props:  # vlnav WAYPOINT: follow the route hint
+            import re  # noqa: PLC0415
+            m = re.search(r"route follower would pick (\d+)", req.text)
+            inside = "(the target room)" in req.text
+            data = {"scene": "mock", "people": [], "action": "arrived" if inside else ("goto" if m else "turn_left"), "choice": int(m.group(1)) if (m and not inside) else 0, "expects": "mock", "why": "mock: route hint"}
+            if "rules_applied" in props:
+                data["rules_applied"] = []
+            return Reply(True, data, time.monotonic() - t0, model="mock")
+        data = {"scene": "mock", "progress": "searching", "action": "goto", "subgoals": [], "path_reasoning": "mock: farthest open floor"}
         if "people" in props:
             data["people"] = []
         if "heading_to" in props:

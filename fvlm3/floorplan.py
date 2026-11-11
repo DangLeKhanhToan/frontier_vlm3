@@ -28,6 +28,7 @@ class StaticMap:
     origin: tuple[float, float]
     zones: list[dict] = dataclasses.field(default_factory=list)  # {name, polygon: [[x,y],...]}
     doors: list[dict] = dataclasses.field(default_factory=list)  # {name, span: [[x,y],[x,y]]}
+    objects: list[dict] = dataclasses.field(default_factory=list)  # {name, xy: [x, y]} furniture (grey dots on the plan)
 
     def world_to_cell(self, x: float, y: float) -> tuple[int, int]:
         return int((x - self.origin[0]) / self.res), int((y - self.origin[1]) / self.res)
@@ -38,6 +39,15 @@ class StaticMap:
         if not (0 <= i < w and 0 <= j < h):
             return True
         return bool(self.occ[j, i])
+
+    def thick_occ(self, sample_res: float) -> np.ndarray:
+        """occ dilated so that sampling every `sample_res` m cannot step over a thin wall (cached)."""
+        cache = self.__dict__.setdefault("_thick", {})
+        k = max(0, int(math.ceil(sample_res / self.res / 2)))
+        if k not in cache:
+            ker = np.ones((2 * k + 1, 2 * k + 1), np.uint8)
+            cache[k] = cv2.dilate(self.occ.astype(np.uint8), ker) > 0 if k else self.occ
+        return cache[k]
 
     def zone_of(self, x: float, y: float) -> str | None:
         for z in self.zones:
@@ -89,6 +99,7 @@ def load_static_map(map_yaml: str, world_yaml: str = "") -> StaticMap:
     sm = StaticMap(occ=occ, res=float(meta["resolution"]), origin=(float(origin[0]), float(origin[1])))
     if world_yaml and pathlib.Path(world_yaml).is_file():
         sm.zones, sm.doors = load_zones(world_yaml)
+        sm.objects = load_objects(world_yaml)
     return sm
 
 
@@ -105,6 +116,19 @@ def load_zones(world_yaml: str) -> tuple[list[dict], list[dict]]:
         if d.get("span"):
             doors.append({"name": str(d.get("name", "")), "span": [[float(a), float(b)] for a, b, *_ in d["span"]]})
     return zones, doors
+
+
+def load_objects(world_yaml: str) -> list[dict]:
+    w = yaml.safe_load(open(world_yaml)) or {}
+    level = (w.get("levels") or [w])[0] if isinstance(w, dict) else {}
+    out = []
+    for o in level.get("objects") or []:
+        p = o.get("pose") or o.get("xy")
+        if isinstance(p, dict):
+            p = [p.get("x"), p.get("y")]
+        if p and len(p) >= 2 and p[0] is not None and p[1] is not None:
+            out.append({"name": str(o.get("name", "")), "xy": [float(p[0]), float(p[1])]})
+    return out
 
 
 def scan_points_robot(scan: np.ndarray | None, max_use: float = 8.0) -> np.ndarray:
@@ -143,10 +167,11 @@ class LocalGrid:
         gx, gy = np.meshgrid(xs, ys)
         ii = ((gx - sm.origin[0]) / sm.res).astype(int)
         jj = ((gy - sm.origin[1]) / sm.res).astype(int)
-        h, w = sm.occ.shape
+        occ = sm.thick_occ(self.res)  # walls one map pixel wide would fall between the samples
+        h, w = occ.shape
         inside = (ii >= 0) & (ii < w) & (jj >= 0) & (jj < h)
         val = np.ones_like(inside)
-        val[inside] = sm.occ[jj[inside], ii[inside]]
+        val[inside] = occ[jj[inside], ii[inside]]
         self.occ |= val.astype(np.uint8)
 
     def add_points(self, pts_map: np.ndarray) -> None:

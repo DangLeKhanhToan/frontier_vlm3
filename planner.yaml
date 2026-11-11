@@ -37,6 +37,9 @@ config:
                         # raw: camera image untouched, no people list, no ground truth (what CMA/NaVid/NaVILA/StreamVLN get)
   floorplan: "on"       # on: top-down floor plan image (+ zone names) and the static map in the harness planner; off: camera only, laser-only local map
   rules: "on"           # on: social navigation rules in the system prompt; off: no rules
+  pipeline: ""          # "": pixel sub-goals; mission: + MISSION call (route through named doors), L2;
+                        # vlnav: + WAYPOINT calls on numbered candidates, laser tracks, event triggers, L3 (needs floorplan on)
+  max_candidates: 7     # vlnav: candidate points per WAYPOINT call
   # ---- model ----
   provider: claude      # claude | openai | gemini | mock
   model: ""             # "" = provider default: claude-opus-5-5 | gpt-5.5 | gemini-3.1-pro-preview
