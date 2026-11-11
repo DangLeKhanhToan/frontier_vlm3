@@ -444,3 +444,69 @@ def test_people_raw_and_vln_profile():
         pr.Conditions(True, True, True, "raw")
     # raw: no people block in the prompt or schema, like people:=off
     assert "People in view" not in pr.user_text(v, "Go to the lab.", 1, 0.0, [], ["p1 2 m ahead"], 0.0, None, "")
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+class _SlowProvider:
+    """Answers `goto` 3 m ahead and takes 8 s on the given clock."""
+
+    def __init__(self, clock, cam):
+        self.clock, self.cam, self.calls = clock, cam, 0
+
+    def __call__(self, req):
+        self.calls += 1
+        self.clock.t += 8.0
+        un, vn = self.cam.px_to_norm(*self.cam.robot_to_pixel(3.0, 0.0, 0.0))
+        return Reply(True, {"action": "goto", "subgoals": [{"u": un, "v": vn, "why": "x"}], "path_reasoning": "r", "scene": "s", "progress": "searching", "rules_applied": []}, 8.0)
+
+
+def _zero(cam, **over):
+    clk = _Clock()
+    prov = _SlowProvider(clk, cam)
+    cfg = {"profile": "vln", "rules": "on", "provider": "mock", "log_dir": "", "latency_mode": "zero", "speed_mps": 0.5, "prefetch_margin_s": 1.0}
+    cfg.update(over)
+    h = Harness(cfg, provider=prov, clock=clk)
+    h.reset("t", {"instruction": "go"})
+    return h, clk, prov
+
+
+def _features(cam, depth, x=0.0):
+    return {"rgb": np.zeros(depth.shape[:2] + (3,), np.uint8), "depth": depth.astype(np.float32), "robot_pose": np.array([x, 0.0, 0.0])}
+
+
+def test_zero_latency_uses_answer_in_same_tick(cam, floor_depth):
+    h, clk, prov = _zero(cam)
+    m = h.step(_features(cam, floor_depth))
+    assert prov.calls == 1 and h.future is None and h.plan is not None and m.kind == "chunk"
+    assert clk.t == pytest.approx(108.0) and h._now() - h.t0 == pytest.approx(0.0)  # the 8 s wait does not count
+    assert h.stats["stale"] == 0 and h.stats["stall_s"] == 0.0
+
+
+def test_zero_latency_asks_just_before_the_plan_ends(cam):
+    h, _, _ = _zero(cam)
+    grid = fp.build_grid(np.zeros(3), None, None, 0.35)
+    h.plan_t = h._now()
+    h.plan = fp.resample([(0.0, 0.0), (1.0, 0.0)])  # 2 s of driving left
+    assert h.predicted_latency() == 0.0 and h._trigger(np.zeros(3), grid, [], h._now()) == ""
+    h.plan = fp.resample([(0.0, 0.0), (0.4, 0.0)])  # 0.8 s left < 1 s margin
+    assert h._trigger(np.zeros(3), grid, [], h._now()) == "prefetch"
+
+
+def test_latency_mode_changes_only_the_latency_paragraph():
+    c = pr.Conditions(False, False, True, "raw")
+    real, zero = pr.system_prompt(c, []), pr.system_prompt(c, [], True)
+    assert "keeps driving while you think" in real and "keeps driving while you think" not in zero
+    assert zero.replace("Continuing: the blue line in the image is the part of the previous plan the robot has not driven yet", "X") != real
+    assert real.split("Latency:")[0] == zero.split("Continuing:")[0] and real.split("Actions:")[1] == zero.split("Actions:")[1]
+
+
+def test_latency_mode_rejects_unknown_value():
+    with pytest.raises(ValueError):
+        Harness({"provider": "mock", "floorplan": "off", "log_dir": "", "latency_mode": "fast"}, provider=MockProvider(latency_s=0.0))

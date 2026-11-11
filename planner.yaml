@@ -65,6 +65,8 @@ config:
   turn_step_deg: 45
   safety_stop_m: 0.45
   # ---- latency pipeline (answer before the plan runs out) ----
+  latency_mode: real         # real: step() never waits, the robot keeps driving during the call (prefetch hides the latency)
+                             # zero: step() waits for the answer; run with lockstep so the simulator waits too (no delay in sim time)
   prefetch: true
   prefetch_margin_s: 1.0     # call when remaining plan time < predicted latency + margin
   latency_init_s: 4.0

@@ -113,6 +113,10 @@ class Harness:
     def __init__(self, cfg: dict, provider=None, clock=time.monotonic):
         self.cfg = cfg
         self.clock = clock
+        mode = str(cfg.get("latency_mode", "real") or "real").strip().lower()
+        if mode not in ("real", "zero"):
+            raise ValueError(f"latency_mode must be 'real' or 'zero', got {mode!r}")
+        self.zero_latency = mode == "zero"  # step() waits for the model, so a lockstep simulator waits with it
         self.cond = pr.Conditions.from_config(cfg)
         self.cam = Camera(
             hfov_deg=float(cfg.get("cam_hfov_deg", 90)),
@@ -130,7 +134,7 @@ class Harness:
             else:
                 _log.warning("floorplan:=on but no map found (set robot.mobile.config.world or map_yaml); the model gets no floor plan image")
         zone_names = [z["name"] for z in self.static.zones] if self.static else []
-        self.system = pr.system_prompt(self.cond, zone_names)
+        self.system = pr.system_prompt(self.cond, zone_names, self.zero_latency)
         self.schema = pr.reply_schema(self.cond)
         self.provider = provider if provider is not None else make_provider(cfg)
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="fvlm3-call")
@@ -147,7 +151,8 @@ class Harness:
     def _new_episode(self, episode_id: str, instruction: str) -> None:
         self.instruction = instruction
         self.episode_id = episode_id
-        self.t0 = self.clock()
+        self.paused_s = 0.0  # time spent waiting for the model in latency_mode zero
+        self.t0 = self._now()
         self.plan: np.ndarray | None = None
         self.plan_t = 0.0
         self.turn_target: float | None = None
@@ -188,7 +193,7 @@ class Harness:
         if lat:
             s["latency_p50"] = float(np.percentile(lat, 50))
             s["latency_p95"] = float(np.percentile(lat, 95))
-        s["elapsed_s"] = self.clock() - self.t0
+        s["elapsed_s"] = self._now() - self.t0
         s["stall_frac"] = s["stall_s"] / max(s["elapsed_s"], 1e-6)
         s["arrived_signal"] = self.arrived
         s["conditions"] = self.cond.tag
@@ -198,7 +203,13 @@ class Harness:
 
     # ------------------------------------------------------------ latency model
 
+    def _now(self) -> float:
+        """Harness time. In latency_mode zero the time spent waiting for the model does not count."""
+        return self.clock() - self.paused_s
+
     def predicted_latency(self) -> float:
+        if self.zero_latency:
+            return 0.0
         lat = self.latencies[-12:]
         if not lat:
             return float(self.cfg.get("latency_init_s", 4.0))
@@ -207,7 +218,7 @@ class Harness:
     # ------------------------------------------------------------ main tick
 
     def step(self, features: dict) -> Motion:
-        now = self.clock()
+        now = self._now()
         pose = _pose(features)
         rgb = _img(features, "rgb")
         depth = _img(features, "depth")
@@ -242,7 +253,10 @@ class Harness:
         people_now = pc.visible_people(peds, pose, self.cam, depth) if (peds is not None) else []
         reason = self._trigger(pose, grid, people_now, now)
         if reason:
+            asked_at = self.clock()
             self._start_call(reason, pose, rgb, depth, people_now, now)
+            if self.zero_latency:
+                now = self._wait_for_answer(pose, grid, asked_at)
 
         # 4. drive
         m = self._motion(pose, scan, grid, now)
@@ -344,6 +358,18 @@ class Harness:
             self.log.image(f"c{self.call_no:03d}_in{k}.jpg", im)
 
     # ------------------------------------------------------------ apply an answer
+
+    def _wait_for_answer(self, pose, grid, asked_at: float) -> float:
+        """latency_mode zero: block this tick until the model answers, then use the answer at once."""
+        try:
+            reply = self.future.result()
+        except Exception as exc:  # noqa: BLE001
+            reply = Reply(False, {}, self.clock() - asked_at, error=repr(exc))
+        snap, self.future, self.snap = self.snap, None, None
+        self.paused_s += self.clock() - asked_at
+        now = self._now()
+        self._apply(reply, snap, pose, grid, now)
+        return now
 
     def _apply(self, reply: Reply, snap: Snapshot | None, pose, grid, now) -> None:
         if snap is None:
